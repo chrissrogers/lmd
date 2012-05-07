@@ -57,18 +57,13 @@ var LMD_JS_SRC_PATH = __dirname + '/../src/',
  *      new LmdBuilder("node lmd_builder.js -m main -c path/to/config.lmd.json -r result.js -v lmd_tiny -l");
  */
 var LmdBuilder = function (data) {
-    var config = this.parseData(data);
+    var args = this.parseData(data);
 
     // apply config
-    this.mode = config.mode || 'main';
-    this.configFile = config.config;
-    this.outputFile = config.output;
-    this.lmdVersionName = config.version || 'lmd_tiny';
-    this.isLog = config.log || false;
-
-    if (!LmdBuilder.versionBuilder[this.lmdVersionName]) {
-        throw new Error('No such LMD version - ' + this.lmdVersionName);
-    }
+    this.mode = args.mode || 'main';
+    this.configFile = args.config;
+    this.outputFile = args.output;
+    this.isLog = args.log || false;
 
     if (LmdBuilder.availableModes.indexOf(this.mode) === -1) {
         throw new Error('No such LMD run mode - ' + this.mode);
@@ -84,18 +79,15 @@ var LmdBuilder = function (data) {
 };
 
 /**
- * LMD builders templates
+ * LMD template
  * 
- * @namespace
+ * @param {Object} data
  */
-LmdBuilder.versionBuilder = {
-    'lmd_min': function (data) {
-        return data.lmd_js + '(' + data.global + ',' + data.sandboxed_modules + ')(' + data.lmd_modules + ')(' + data.lmd_main + ')';
-    },
-
-    'lmd_tiny': function (data) {
-        return data.lmd_js + '(' + data.global + ',' + data.lmd_main + ',' + data.lmd_modules + ',' + data.sandboxed_modules + ')';
-    }
+LmdBuilder.prototype.template = function (data) {
+    return data.lmd_js + '(' + data.global + ',' + data.lmd_main + ',' + data.lmd_modules + ',' + data.sandboxed_modules +
+        // if version passed
+        (data.version ? ',' + data.version : '') +
+    ')';
 };
 
 /**
@@ -157,7 +149,6 @@ LmdBuilder.prototype.parseData = function (data) {
             config.mode = config.mode || config.m;
             config.output = config.output || config.o;
             config.log = config.log || config.l;
-            config.version = config.version || config.v;
             config.config = config.config || config.c;
         } else {
             // an old argv format, split argv and parse manually
@@ -168,15 +159,13 @@ LmdBuilder.prototype.parseData = function (data) {
                 config = {
                     mode: 'main',
                     config: data[2],
-                    output: data[3],
-                    version: data[4]
+                    output: data[3]
                 };
             } else { // with mode
                 config = {
                     mode: data[2],
                     config: data[3],
-                    output: data[4],
-                    version: data[5]
+                    output: data[4]
                 };
             }
         }
@@ -260,25 +249,27 @@ LmdBuilder.prototype.escape = function (file) {
  * @param {String[]} lmd_modules
  * @param {String}   lmd_main
  * @param {Boolean}  pack
- * @param {String}   globalObject
  * @param {String[]} sandboxed_modules
  *
  * @returns {String}
  */
-LmdBuilder.prototype.render = function (lmd_modules, lmd_main, pack, globalObject, sandboxed_modules) {
-    globalObject = globalObject || 'this';
+LmdBuilder.prototype.render = function (config, lmd_modules, lmd_main, pack, sandboxed_modules) {
     sandboxed_modules = JSON.stringify(sandboxed_modules || {});
-    var lmd_js = fs.readFileSync(LMD_JS_SRC_PATH + this.lmdVersionName + '.js', 'utf8'),
+    var lmd_js = fs.readFileSync(LMD_JS_SRC_PATH + 'lmd.js', 'utf8'),
         result;
 
+    // Apply patch if LMD package in cache Mode
+    lmd_js = this.patchLmdSource(lmd_js, config);
     lmd_modules = '{\n' + lmd_modules.join(',\n') + '\n}';
 
-    result = LmdBuilder.versionBuilder[this.lmdVersionName]({
+    result = this.template({
         lmd_js: lmd_js,
-        global: globalObject,
+        global: config.global || 'this',
         lmd_main: lmd_main,
         lmd_modules: lmd_modules,
-        sandboxed_modules: sandboxed_modules
+        sandboxed_modules: sandboxed_modules,
+        // if version passed -> module will be cached
+        version: JSON.stringify(config.version) || false
     });
 
     if (pack) {
@@ -288,12 +279,58 @@ LmdBuilder.prototype.render = function (lmd_modules, lmd_main, pack, globalObjec
     return result;
 };
 
+LmdBuilder.FLAG_NAME_TO_OPTION_NAME_MAP = {
+    async: "ASYNC",
+    cache: "CACHE",
+    js: "JS",
+    css: "CSS"
+};
+
+/**
+ * Patches lmd source
+ *
+ * @param {String}  lmd_js
+ * @param {Object} config
+ *
+ * @returns {String}
+ */
+LmdBuilder.prototype.patchLmdSource = function (lmd_js, config) {
+    var optionName,
+        leftPattern,
+        rightPattern,
+        leftIndex,
+        rightIndex;
+
+    for (var flagName in LmdBuilder.FLAG_NAME_TO_OPTION_NAME_MAP) {
+        optionName = LmdBuilder.FLAG_NAME_TO_OPTION_NAME_MAP[flagName];
+
+        if (config[flagName]) {
+            // apply: remove left & right side
+            lmd_js = lmd_js.replace(new RegExp('\\/\\*\\$(END)?IF ' + optionName + '\\$\\*\\/', 'g'), '');
+        } else {
+            // remove: wipe all content
+            leftPattern = '/*$IF ' + optionName + '$*/';
+            rightPattern = '/*$ENDIF ' + optionName + '$*/';
+            
+            // wipe all blocks
+            while (true) {
+                leftIndex = lmd_js.indexOf(leftPattern);
+                if (leftIndex === -1) break;
+                rightIndex = lmd_js.indexOf(rightPattern) + rightPattern.length;
+                lmd_js = lmd_js.substring(0, leftIndex) + lmd_js.substring(rightIndex);
+            }
+        }
+    }
+
+    return lmd_js;
+};
+
 /**
  * Performs configuration
  */
 LmdBuilder.prototype.configure = function () {
     if (!this.configFile) {
-        console.log('lmd usage:\n\t    lmd config.lmd.json [output.lmd.js] [lmd_min|lmd_tiny]');
+        console.log('lmd usage:\n\t    lmd config.lmd.json [output.lmd.js]');
         return false;
     }
     return true;
@@ -392,6 +429,11 @@ LmdBuilder.prototype.collectModules = function (config) {
         } else { // case "moduleName": {"path": "path/to/module.js", "lazy": false}
             modulePath = moduleDesciptor.path;
             moduleLazy = typeof moduleDesciptor.lazy === "undefined" ? globalLazy : moduleDesciptor.lazy;
+        }
+
+        // Override if cache flag = true
+        if (config.cache) {
+            moduleLazy = true;
         }
         // its a wildcard
         // "*": "*.js" or "*_pewpew": "*.ru.json" or "ololo": "*.js"
@@ -588,7 +630,7 @@ LmdBuilder.prototype.build = function (callback) {
         }
 
         sandbox = this.getSandboxedModules(modules, config);
-        lmdFile = this.render(lmdModules, lmdMain, pack, config.global, sandbox);
+        lmdFile = this.render(config, lmdModules, lmdMain, pack, sandbox);
 
         if (this.outputFile) {
             fs.writeFileSync(this.outputFile, lmdFile,'utf8')
