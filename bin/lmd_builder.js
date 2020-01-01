@@ -533,14 +533,13 @@ LmdBuilder.prototype.build = function (callback) {
         lazy = typeof config.lazy === "undefined" ? true : config.lazy,
         mainModuleName = config.main,
         pack = lazy ? true : typeof config.pack === "undefined" ? true : config.pack,
-        textRegex = /\.(txt|htm|html|xhtml|md|markdown|xml|jade|mustache|handlebars|hbs)$/i,
         moduleContent,
         lmdModules = [],
         sandbox,
         lmdMain,
         lmdFile,
         isJson,
-        isText,
+        isModule,
         module,
         modules;
 
@@ -554,32 +553,36 @@ LmdBuilder.prototype.build = function (callback) {
             try {
                 JSON.parse(moduleContent);
                 isJson = true;
-                isText = false;
             } catch (e) {
                 isJson = false;
             }
 
             if (!isJson) {
-                if (textRegex.test(module.path)) {
-                    // if this is a text file, save it as a string literal
-                    moduleContent = this.escape('LMD_noexec!' + moduleContent);
-                    isText = true;
-                } else {
-                    // assume js
+                try {
                     moduleContent = this.tryWrap(moduleContent);
-                    if (pack) {
-                        moduleContent = this.compress(moduleContent);
-                    }
-                    isText = false;
+                    isModule = true;
+                } catch(e) {
+                    isModule = false;
+                }
+
+                if (isModule && pack) {
+                    moduleContent = this.compress(moduleContent);
                 }
             }
 
             if (module.name === mainModuleName) {
                 lmdMain = moduleContent;
             } else {
-                if (!isJson && !isText && module.is_lazy) {
-                    moduleContent = this.escape('(' + moduleContent.replace(/^function[^\(]*/, 'function') + ')' );
+                if (isModule && !isJson && module.is_lazy) {
+                    moduleContent = moduleContent.replace(/^function[^\(]*/, 'function');
+                    if (moduleContent.indexOf('(function(') !== 0) {
+                        moduleContent = '(' + moduleContent + ')';
+                    }
+                    moduleContent = this.escape(moduleContent);
+                } else if (!isModule) {
+                    moduleContent = this.escape(moduleContent);
                 }
+
                 lmdModules.push(this.escape(module.name) + ': ' + moduleContent);
             }
         }
